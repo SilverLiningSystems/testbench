@@ -1,0 +1,199 @@
+#!/usr/bin/env python
+
+# Send UDP broadcast packets
+
+MYPORT = 13160
+RMCPPORT = 623
+BUF_SIZE = 1600     # > 1500
+ETH_P_ALL = 3       # To receive all Ethernet protocols
+VER_MAGIC = 0x6a01
+MSG_FRU_RECOVERY = 1
+MSG_GET_NODE_STATUS = 2
+MSG_SET_NODEID = 3
+MSG_ADAPTER_TYPE_CHANGE = 6
+
+connection_type = {
+1: "DISABLED", 
+2: "UPLINK",
+3: "INTERCONNECT",
+4: "MAC_LINK",
+5: "SGMII_MANAGE",
+6: "FABRIC_LINK",
+}
+
+fabric_config_type = {
+1:"NEGOTIATED",
+2:"DISCOVERED",
+3:"x1G",
+4:"x10G",
+}
+
+import sys, time, binascii, hashlib, struct, optparse, commands
+
+from socket import *
+from struct import *
+
+header_len = 35
+node_id = 128
+ttl = 64
+src_link_id = 0
+src_type = 1
+result  = {}
+
+def getmac(iface):
+    words = commands.getoutput("ifconfig " + iface).split()
+    if "HWaddr" in words:
+         return words[ words.index("HWaddr") + 1 ].replace(":","")
+    else:
+         return ''
+
+def getIP(iface):
+    words = commands.getoutput("ifconfig " + iface).split()
+    if "inet" in words:
+         return words[ words.index("inet") + 1 ].strip("addr:")
+    else:
+         return ''
+
+def SMAC(packet):
+   return binascii.hexlify(packet[6:12]).decode()
+
+def EtherType(packet):
+   return binascii.hexlify(packet[12:14]).decode()
+
+def parse_ctype(ctype):
+    ctype, ftype, slot, destination = struct.unpack(">BBBB", ctype)
+    if ctype not in connection_type.keys():
+        return "Unknown"
+    else:
+        return (connection_type[ctype])
+
+def printPacket(packet):
+    ip_header = packet[14:34]
+    payload = packet[14:]
+    ip_src = payload[12:16]
+    ip_dst = payload[16:20]
+    ipdata = payload[20:]
+    udpdata = payload[28:]
+    udpheader = ipdata[:8]
+    header = udpdata[:24]
+    content = udpdata[24:]
+    srcport, destport, udplength, checksum = struct.unpack(">HHHH", udpheader);
+    #print srcport, destport, udplength
+    if srcport != MYPORT or destport != MYPORT:
+        return ""
+
+    msg_ver_magic, msg_len, neighbor_node_id, neighbor_mac, src_node_id, src_mac, ttl, src_link_id, src_type = struct.unpack(">HHH6sH6sHBB", header)
+    if msg_ver_magic != VER_MAGIC:
+        return ""
+
+    msg_id, maclink_mac, fru_status, phy_config = struct.unpack(">H6sB24s", content)
+    
+    #print "MAC: ", SMAC(packet), msg_len, neighbor_node_id, binascii.hexlify(neighbor_mac), src_node_id, binascii.hexlify(src_mac)
+    if src_mac not in result:
+        print "Node ID:", src_node_id, " Source MAC:", binascii.hexlify(src_mac), " Maclink MAC:", binascii.hexlify(maclink_mac),
+        for i in range(0, 24, 4):
+            print parse_ctype(phy_config[i:i+4]),
+            if (i<20):
+                print "/",
+        print
+        result[src_mac] = src_node_id
+    return ""
+# verify with RMCP ping
+
+def sendPing():
+    try:
+        s = socket(AF_INET, SOCK_DGRAM)
+        s.bind((getIP(opts.interface), RMCPPORT))
+        s.setsockopt(SOL_SOCKET, SO_BROADCAST, 1)
+    except error, (value,message): 
+        if s: 
+            s.close() 
+        print "Could not open socket: " + message 
+        sys.exit(1)
+
+    datastr = "06 00 ff 06 00 00 11 be 80 00 00 00"
+    recvheader = binascii.unhexlify("0600ff06000011be40000010000011be")
+
+    #print datastr
+
+    datastr = datastr.replace(" ","")
+    data = binascii.unhexlify(datastr)
+
+    s.sendto(data, ('<broadcast>', RMCPPORT))
+    s.close()
+
+parser = optparse.OptionParser()
+parser.add_option("-i", "--interface", dest = "interface", type="str",
+                 help = "your NIC interface name")
+
+opts, args = parser.parse_args()
+
+if len(sys.argv) == 1: # if only 1 argument, it's the script name
+    parser.print_help()
+    exit()
+if opts.interface is None:
+    parser.error('Interface not given')
+    exit()
+
+lmac = getmac(opts.interface)
+print "Interface=" + opts.interface + ", IP = " + getIP(opts.interface)
+
+try:
+    s = socket(AF_INET, SOCK_DGRAM)
+    #s.bind(('<broadcast>', MYPORT))
+    s.bind((getIP(opts.interface), MYPORT))
+    s.setsockopt(SOL_SOCKET, SO_BROADCAST, 1)
+except error, (value,message): 
+    if s: 
+        s.close() 
+    print "Could not open socket: " + message 
+    sys.exit(1)
+
+
+msg_id = MSG_GET_NODE_STATUS
+data = pack('>H', msg_id)
+
+header = pack('>H', VER_MAGIC) + pack('>H', header_len) + pack('>H', node_id) + binascii.unhexlify(lmac) + pack('>H', node_id) + binascii.unhexlify(lmac) + pack('>H', ttl) + pack('B', src_link_id) + pack('B', src_type)
+
+for i in range(1):
+    try:
+        print "Sending broadcast packets... " + str(i+1)
+        #s.sendto(pack('h', msg_id) + m.digest() + pack('h', len(data)) + data, ('<broadcast>', MYPORT))
+        s.sendto(header + data, ('<broadcast>', MYPORT))
+    except error, e:
+        print "Error sending data: %s" % e
+        sys.exit(1)
+
+    #time.sleep(2)
+s.close()
+#sendPing()
+sock = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL))
+sock.bind((opts.interface, ETH_P_ALL))
+sock.settimeout(2)
+
+#print "Waiting 20 seconds to scan device ...(Press Ctrl+C to break)"
+#time.sleep(20)
+
+while True: 
+    try:
+        packet = sock.recv(BUF_SIZE)
+    except timeout, e:
+        err = e.args[0]
+        # this next if/else is a bit redundant, but illustrates how the
+        # timeout exception is setup
+        if err == 'timed out':
+            time.sleep(1)
+            #print 'recv timed out, retry later'
+            continue
+        else:
+            print e
+            sys.exit(1)
+    except error, e:
+        # Something else happened, handle error, exit, etc.
+        print e
+        sys.exit(1)
+    else:
+        etype = EtherType(packet)
+        if etype == "0800":
+          m = printPacket(packet)
+            
