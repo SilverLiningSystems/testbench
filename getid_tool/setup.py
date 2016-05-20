@@ -5,7 +5,7 @@ setup(
     name = 'getid_tools',
     packages = ['getid_tool'],
     scripts = ['getid_tool/getid'],
-    version = '1.3c',
+    version = '1.3c2',
     description = 'SLS Get ID Tool',
     long_description=open("README").read(),
     author = 'sls.jarvis, SLS-BrianKe',
